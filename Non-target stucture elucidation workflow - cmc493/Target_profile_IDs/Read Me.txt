@@ -1,0 +1,2 @@
+Must include a .csv file with at least a column 'Pro.ID' and 
+the enviMass profile IDs for the target compouds.

@@ -1,0 +1,8 @@
+The RT database must be updated to match your instrument methods!
+Must include a column for 'InchI' and 'RetentionTime'. 
+
+MassBankEU and mzCloud .csv files are used for MS/MS database lookups and 
+the SusDat .csv file is used as a suspect list. All can be updated to fit 
+your needs as long as InChIKey's are used.
+
+Files are available at: https://www.norman-network.com/?q=node/236

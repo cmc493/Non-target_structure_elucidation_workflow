@@ -1,0 +1,6 @@
+Please convert all instrument files into .mzXML files using MSConvert 
+(available at: http://proteowizard.sourceforge.net/tools.shtml) and the
+following settings: 
+
+output format: mzXML
+Filter: peakPicking, vendor mzLevel=1-2

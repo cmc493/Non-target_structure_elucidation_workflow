@@ -1,0 +1,1728 @@
+---
+title: "Non-target structure elucidation workflow - v1.0"
+author: 
+- "Corey M. G. Carpenter, and Damian E. Helbling"
+- "School of Civil and Environmental Engineering, Cornell University, Ithaca, NY, USA"
+date: "13 November 2018"
+output:
+  html_document:
+    highlight: pygments
+    theme: spacelab
+    toc: TRUE
+  pdf_document: default
+  word_document:
+    reference_docx: null
+---
+```{r}
+options(java.parameters = "-Xmx2048m")
+```
+
+Upon first usage, run the following chunk to install all required R packages (Rx64 v3.3.3).
+```{r, eval = F}
+install.packages(c("devtools",
+                   "shiny",
+                   "plotly",
+                   "XLConnect",
+                   "xlsx",
+                   "dendextend",
+                   "OrgMassSpecR",
+                   "readMzXmlData",
+                   "RCurl"))
+# Do you want to install from sources the package which needs compilation? 
+# n
+
+require(devtools)
+source("https://bioconductor.org/biocLite.R")
+biocLite(c("MSnbase", "mzR", "RMassBank"))
+
+install_github("c-ruttkies/MetFragR/metfRag")
+install_github("schymane/GenFormR")
+```
+
+If there are any issues installing the packages with dependencies on rJava, please try the following:
+```{r, eval = F}
+install.packages("xlsx",INSTALL_opts= "--no-multiarch")
+options(devtools.install.args = "--no-multiarch") 
+install_github("c-ruttkies/MetFragR/metfRag")
+```
+
+#Load required packages
+Please make sure all pacakges are properly installed and loaded before attempting to use the workflow. 
+```{r}
+packages <- c("devtools","shiny","plotly","XLConnect","xlsx","dendextend","MSnbase",
+              "OrgMassSpecR","readMzXmlData","mzR","metfRag","RMassBank","GenFormR")
+
+lapply(packages, require, character.only = TRUE)
+
+packinfo <- data.frame("Package" = packages, "Installed" = packages %in% rownames(installed.packages()),
+                       "Loaded"  = packages %in% loadedNamespaces(),
+                       "Version" = rep(NA, 13))
+for(i in 1:length(packages)){
+  if(packinfo[i,"Installed"]){
+    packinfo[i,"Version"] <- paste0(packageVersion(packinfo[i,"Package"]))
+  }
+}
+packinfo
+```
+
+#Input files and folders
+Update to match your system, then hit 'Run' -> 'Run all' (Ctrl+Alt+R). You can then run the shiny app by executing 'NT.fcn()' in the console at any time.  
+```{r}
+#working directory (cannot contain any spaces)
+setwd("")
+
+#envimass folder location (leave as 'NULL' if not using enviMass)
+filename.envi = NULL
+
+#mzXML folder location
+filename.msms = file.path(paste0(getwd(),"/mzXML_files"))
+
+#GenForm folder location 
+#download here: https://sourceforge.net/projects/genform/
+filename.gen = file.path(paste0(getwd(),"/MSMS/GenForm_output"))
+
+#Metfrag folder location
+filename.met = file.path(paste0(getwd(),"/MSMS/Metfrag_output"))
+
+#RT database file location
+filename.RT.lvi =  file.path(paste0(getwd(),"/MSMS/RT.csv"))
+filename.RT.svi =  file.path(paste0(getwd(),"/MSMS/RT_direct.csv"))
+
+#Suspect list file location
+filename.sus = file.path(paste0(getwd(),"/MSMS/SusDat.csv"))
+
+#ChemSPider token (only if using chemspider database, otherwise leave as 'NULL')
+ChemSpiderToken = NULL
+
+#target profile IDs
+target.pro.IDs.pos <- file.path(paste0(getwd(),"/Target_profile_IDs/target.pro.IDs.pos.csv"))
+target.pro.IDs.neg <- file.path(paste0(getwd(),"/Target_profile_IDs/target.pro.IDs.neg.csv"))
+
+#MassBank and mzcloud .csv datasheets
+#available at: https://www.norman-network.com/?q=node/236
+ref.mb = read.csv(file.path(paste0(getwd(),"/MSMS/MassBankEU.csv")))
+ref.mz = read.csv(file.path(paste0(getwd(),"/MSMS/mzCloud.csv")))
+
+#Plotly username and key for exporting plots
+#obtain here: https://plot.ly/r/getting-started/
+Sys.setenv("plotly_username"="")
+Sys.setenv("plotly_api_key"="")
+
+#Folder for exports
+filename.plot <- file.path(paste0(getwd(),"/Output_profiles"))
+```
+
+#Functions
+
+##MetFrag
+
+###MetFrag example
+Run this code chunk to test if MetFrag is functioning.
+```{r, eval = FALSE}
+#
+# first define the settings object
+#
+settingsObject<-list()
+#
+# set database parameters to select candidates
+#
+settingsObject[["DatabaseSearchRelativeMassDeviation"]]<-5.0
+settingsObject[["FragmentPeakMatchAbsoluteMassDeviation"]]<-0.001
+settingsObject[["FragmentPeakMatchRelativeMassDeviation"]]<-5.0
+
+
+if(is.null(ChemSpiderToken)){
+settingsObject[["MetFragDatabaseType"]]<-"ExtendedPubChem"}else{
+settingsObject[["MetFragDatabaseType"]]<-"ChemSpider"
+settingsObject[["ChemSpiderToken"]]<-ChemSpiderToken}
+
+#
+# the more information about the precurosr is available
+# the more precise is the candidate selection
+#
+#settingsObject[["NeutralPrecursorMass"]]<-253.966126
+settingsObject[["NeutralPrecursorMolecularFormula"]]<-"C7H5Cl2FN2O3"
+#settingsObject[["PrecursorCompoundIDs"]]<-c("50465", "57010914", "56974741", "88419651", "23354334")
+#
+# pre and post-processing filter
+#
+# define filters to filter unconnected compounds (e.g. salts)
+settingsObject[["MetFragPreProcessingCandidateFilter"]]<-c("UnconnectedCompoundFilter","IsotopeFilter")
+settingsObject[["MetFragPostProcessingCandidateFilter"]]<-c("InChIKeyFilter")
+#
+# define the peaklist as 2-dimensional matrix
+#
+settingsObject[["PeakList"]]<-matrix(c(
+90.97445, 681,
+106.94476, 274,
+110.02750, 110,
+115.98965, 95,
+117.98540, 384,
+124.93547, 613,
+124.99015, 146,
+125.99793, 207,
+133.95592, 777,
+143.98846, 478,
+144.99625, 352,
+146.00410, 999,
+151.94641, 962,
+160.96668, 387,
+163.00682, 782,
+172.99055, 17,
+178.95724, 678,
+178.97725, 391,
+180.97293, 999,
+196.96778, 720,
+208.96780, 999,
+236.96245, 999,
+254.97312, 999), ncol=2, byrow=TRUE)
+#
+# run MetFrag
+#
+scored.candidates<-run.metfrag(settingsObject)
+#
+# scored.candidates is a data.frame with scores and candidate properties
+#
+scored.candidates
+```
+
+###MetFrag functions
+```{r}
+
+# chemical formula
+MSMS.fcn<-function(mz,RT,MSMS,CF,ionmode){
+
+xlcFreeMemory() #free Java virtual machine memory
+xlcMemoryReport()
+
+settingsObject<-list()
+
+settingsObject[["MetFragDatabaseType"]]<-"ExtendedPubChem"
+
+if(is.null(ChemSpiderToken)){
+settingsObject[["MetFragDatabaseType"]]<-"ExtendedPubChem"}else{
+settingsObject[["MetFragDatabaseType"]]<-"ChemSpider"
+settingsObject[["ChemSpiderToken"]]<-ChemSpiderToken}
+
+settingsObject[["NumberThreads"]]<-10
+
+settingsObject[["DatabaseSearchRelativeMassDeviation"]]<-5.0
+settingsObject[["FragmentPeakMatchAbsoluteMassDeviation"]]<-0.001
+settingsObject[["FragmentPeakMatchRelativeMassDeviation"]]<-5.0
+
+#input MS
+if(ionmode > 0){
+  settingsObject[["IsPositiveIonMode"]]<-TRUE
+  settingsObject[["NeutralPrecursorMass"]]<-mz-1.007825
+  }else{
+  settingsObject[["IsPositiveIonMode"]]<-FALSE
+  settingsObject[["NeutralPrecursorMass"]]<-mz+1.007825
+}
+settingsObject[["PrecursorIonMode"]]<-ionmode
+
+#input Chemical Formula 
+settingsObject[["NeutralPrecursorMolecularFormula"]]<-CF
+
+#input MS2 data
+settingsObject[["PeakList"]]<-data.matrix(MSMS)
+
+#input RT (min)
+settingsObject[["RetentionTimeTrainingFile"]] <- filename.RT
+settingsObject[["ExperimentalRetentionTimeValue"]] <- RT
+
+#input suspect list
+settingsObject[["ScoreSuspectLists"]]<- filename.sus
+
+#pre- and post-processing filter
+settingsObject[["MetFragPreProcessingCandidateFilter"]]<-c("UnconnectedCompoundFilter","IsotopeFilter")
+settingsObject[["MetFragPostProcessingCandidateFilter"]]<-c("InChIKeyFilter")
+
+#scoring with suspect list and RT
+settingsObject[["MetFragScoreTypes"]]<-c("FragmenterScore","PubChemNumberPatents","PubChemNumberPubMedReferences","SuspectListScore","OfflineMetFusionScore","RetentionTimeScore")
+settingsObject[["MetFragScoreWeights"]]<-scores
+
+#run MetFrag
+scored.candidates<<-run.metfrag(settingsObject)
+scored.candidates
+}
+
+
+# m/z value
+MSMS.fcn.mz<-function(mz,RT,MSMS,atoms,ionmode){
+
+xlcFreeMemory() #free Java virtual machine memory
+xlcMemoryReport()
+
+settingsObject<-list()
+
+if(is.null(ChemSpiderToken)){
+settingsObject[["MetFragDatabaseType"]]<-"ExtendedPubChem"}else{
+settingsObject[["MetFragDatabaseType"]]<-"ChemSpider"
+settingsObject[["ChemSpiderToken"]]<-ChemSpiderToken}
+
+settingsObject[["NumberThreads"]]<-10
+
+settingsObject[["DatabaseSearchRelativeMassDeviation"]]<-5.0
+settingsObject[["FragmentPeakMatchAbsoluteMassDeviation"]]<-0.001
+settingsObject[["FragmentPeakMatchRelativeMassDeviation"]]<-5.0
+
+#input MS
+if(ionmode > 0){
+  settingsObject[["IsPositiveIonMode"]]<-TRUE
+  settingsObject[["NeutralPrecursorMass"]]<-mz-1.007825
+  }else{
+  settingsObject[["IsPositiveIonMode"]]<-FALSE
+  settingsObject[["NeutralPrecursorMass"]]<-mz+1.007825
+}
+settingsObject[["PrecursorIonMode"]]<-ionmode #1 = M+H
+
+#input atoms
+atoms.all <- c("C", "H", "N", "O", "P", "F", "S", "Cl", "I", "Br", "Si", "Se")
+settingsObject[["FilterExcludedElements"]] <- atoms.all[!(atoms.all %in% atoms)]
+
+#input MS2 data
+settingsObject[["PeakList"]]<-data.matrix(MSMS)
+
+#input RT (min)
+settingsObject[["RetentionTimeTrainingFile"]] <- filename.RT
+settingsObject[["ExperimentalRetentionTimeValue"]] <- RT
+
+#input suspect list
+settingsObject[["ScoreSuspectLists"]]<- filename.sus
+
+#pre- and post-processing filter
+settingsObject[["MetFragPreProcessingCandidateFilter"]]<-c("UnconnectedCompoundFilter","IsotopeFilter",
+                                                           "ElementExclusionFilter")
+settingsObject[["MetFragPostProcessingCandidateFilter"]]<-c("InChIKeyFilter")
+
+#scoring with suspect list and RT
+settingsObject[["MetFragScoreTypes"]]<-c("FragmenterScore","PubChemNumberPatents","PubChemNumberPubMedReferences","SuspectListScore","OfflineMetFusionScore","RetentionTimeScore")
+settingsObject[["MetFragScoreWeights"]]<-scores
+
+
+#run MetFrag
+scored.candidates<<-run.metfrag(settingsObject)
+scored.candidates
+}
+
+
+# rerun
+MSMS.fcn.rerun<-function(RT,MSMS,CF,ionmode,pubchemid){
+
+xlcFreeMemory() #free Java virtual machine memory
+xlcMemoryReport()
+
+settingsObject<-list()
+
+settingsObject[["MetFragDatabaseType"]]<-"ExtendedPubChem"
+settingsObject[["NumberThreads"]]<-10
+
+settingsObject[["DatabaseSearchRelativeMassDeviation"]]<-5.0
+settingsObject[["FragmentPeakMatchAbsoluteMassDeviation"]]<-0.001
+settingsObject[["FragmentPeakMatchRelativeMassDeviation"]]<-5.0
+
+settingsObject[["PrecursorCompoundIDs"]]<-c(pubchemid, "57010914")
+
+
+if(ionmode > 0){settingsObject[["IsPositiveIonMode"]]<-TRUE}else{settingsObject[["IsPositiveIonMode"]]<-FALSE}
+settingsObject[["PrecursorIonMode"]]<-ionmode #1 = M+H
+
+settingsObject[["NeutralPrecursorMolecularFormula"]]<-CF
+
+#input MS2 data
+settingsObject[["PeakList"]]<-data.matrix(MSMS)
+
+#input RT (min)
+settingsObject[["RetentionTimeTrainingFile"]] <- filename.RT
+settingsObject[["ExperimentalRetentionTimeValue"]] <- RT
+
+#input suspect list
+settingsObject[["ScoreSuspectLists"]]<- filename.sus
+
+#pre- and post-processing filter
+settingsObject[["MetFragPreProcessingCandidateFilter"]]<-c("UnconnectedCompoundFilter","IsotopeFilter")
+settingsObject[["MetFragPostProcessingCandidateFilter"]]<-c("InChIKeyFilter")
+
+#scoring with suspect list and RT
+settingsObject[["MetFragScoreTypes"]]<-c("FragmenterScore","PubChemNumberPatents","PubChemNumberPubMedReferences","SuspectListScore","OfflineMetFusionScore","RetentionTimeScore")
+settingsObject[["MetFragScoreWeights"]]<-scores
+
+#run MetFrag
+scored.candidates<<-run.metfrag(settingsObject)
+scored.candidates
+}
+```
+
+###Edit envimass profile function
+```{r}
+#from package 'enviMass'
+analyseE_links_profiles <- function (profileList_index, links_profiles, sort_what = "deltaint_newest", 
+    sort_decreasing = TRUE, use_profile = NULL, with_bar = FALSE, 
+    return_excl = FALSE) 
+{
+    if (any(is.na(match(sort_what, colnames(profileList_index))))) {
+        stop("\nFunction analyseE_links_profiles: wrong sort_what - debug!")
+    }
+    those_profiles <- profileList_index[, "profile_ID"]
+    keep_out <- rep(TRUE, length(those_profiles))
+    if (!is.null(use_profile)) {
+        if (length(use_profile) != dim(profileList_index)[1]) {
+            stop("\nArgument use_profile must be of same length as number of profiles - abort.")
+        }
+        keep_out[!use_profile] <- FALSE
+    }
+    else {
+        use_profile <- rep(TRUE, length(those_profiles))
+    }
+    if (sort_decreasing) {
+        along <- rev(do.call(order, as.data.frame(profileList_index[, 
+            sort_what, drop = FALSE])))
+    }
+    else {
+        along <- do.call(order, as.data.frame(profileList_index[, 
+            sort_what, drop = FALSE]))
+    }
+    for (i in 1:length(along)) {
+        if (!is.null(use_profile)) {
+            if (use_profile[along[i]] == FALSE) 
+                next
+        }
+        if (keep_out[along[i]] == FALSE) 
+            next
+        if (profileList_index[along[i], "links"] == 0) 
+            next
+        at_entry <- profileList_index[along[i], "links"]
+        if (!length(links_profiles[[at_entry]])) 
+            next
+        if (length(links_profiles[[at_entry]][["group"]]) > 0) {
+            those <- match(links_profiles[[at_entry]][["group"]], 
+                profileList_index[, "profile_ID"])
+            those <- those[!is.na(those)]
+            if (length(those)) {
+                keep_out[those] <- FALSE
+            }
+        }
+    }
+    cat(paste0("Reduction factor from profile grouping: ", as.character(round((length(keep_out)/sum(keep_out)), 
+        digits = 3))))
+    if (return_excl) {
+        return(those_profiles[!keep_out])
+    }
+    else {
+        return(those_profiles[keep_out])
+    }
+}
+
+
+profiles_to_matrix <- function (profileList, links_profiles = NULL, sort_by = c("number_peaks_sample", 
+    "mean_int"), reduce_comp2 = FALSE, reduce_comp = FALSE, n_profiles = NULL, only_sample_peaks = FALSE, 
+    n_latest_peaks = NULL, median_above_blind = NULL, normalize = FALSE, min_RT = NULL, min_mean_int_sample = NULL, max_mean_int_sample = NULL) 
+{
+    if (any(is.na(match(sort_by, colnames(profileList[["index_prof"]]))))) {
+        stop("Argument sort_by not matching column names - abort.")
+    }
+    if (!profileList[["state"]]["profiling"][[1]]) {
+        stop("\nprofileList not profiled - abort.")
+    }
+    len <- dim(profileList[["index_prof"]])[1]
+    if (!is.logical(normalize)) {
+        stop("\nArgument normalize must be logical - abort.")
+    }
+    if ((reduce_comp) & (!is.list(links_profiles))) {
+        stop("\n Either set reduce_comp=FALSE or provide a valid links_profiles list - abort.")
+    }
+    ord <- order(as.POSIXct(profileList[["datetime"]]), decreasing = TRUE)
+    type <- profileList[["type"]][ord]
+    file_ID <- profileList[["sampleID"]][ord]
+    if (only_sample_peaks) {
+        file_ID <- file_ID[type == "sample"]
+    }
+    if (!is.null(n_latest_peaks)[1]) {
+        type <- type[1:n_latest_peaks]
+        file_ID <- file_ID[1:n_latest_peaks]
+    }
+    keep <- rep(TRUE, len)
+    profile_IDs <- profileList[["index_prof"]][, "profile_ID"]
+    if (only_sample_peaks) {
+        keep[profileList[["index_prof"]][, "number_peaks_sample"] == 
+            0] <- FALSE
+    }
+    if (!is.null(median_above_blind)[1]) {
+        keep[profileList[["index_prof"]][, "above_blind?"] < 
+            median_above_blind] <- FALSE
+###EDIT
+#keep profiles not detected in the blind
+        keep[profileList[["index_prof"]][, "in_blind?"] == 
+            0] <- TRUE
+    }
+#RT filter
+    if (!is.null(min_RT)[1]) {
+        keep[profileList[["index_prof"]][, "mean_RT"] < min_RT] <- FALSE    
+    }
+#min mean sample intensity filter
+    if (!is.null(min_mean_int_sample)[1]) {
+        keep[profileList[["index_prof"]][, "mean_int_sample"] < min_mean_int_sample] <- FALSE    
+    }
+#max mean sample intensity filter
+    if (!is.null(max_mean_int_sample)[1]) {
+        keep[profileList[["index_prof"]][, "mean_int_sample"] > max_mean_int_sample] <- FALSE    
+    }
+#remove profiles without links (isoptopolgues / adducts)
+    if (reduce_comp2) {
+        keep[profileList[["index_prof"]][, "links"] == 0] <- FALSE
+    }
+###
+    if (reduce_comp) {
+        keep_IDs <- analyseE_links_profiles(profileList_index = profileList[["index_prof"]], 
+            links_profiles, sort_what = sort_by, use_profile = keep, 
+            return_excl = TRUE)
+        if (length(keep_IDs)) {
+            keep[match(keep_IDs, profile_IDs)] <- FALSE
+        }
+    }
+    max_ord <- profileList[["index_prof"]][, sort_by, drop = FALSE]
+    profile_IDs <- profile_IDs[keep]
+    max_ord <- max_ord[keep, , drop = FALSE]
+    max_int_ord <- rev(do.call(order, as.data.frame(max_ord)))
+    profile_IDs <- profile_IDs[max_int_ord]
+    if (is.null(n_profiles)) {
+        n_profiles <- length(profile_IDs)
+    }
+    else {
+        if (n_profiles > length(profile_IDs)) {
+            n_profiles <- length(profile_IDs)
+        }
+    }
+    mat <- matrix(nrow = length(file_ID), ncol = n_profiles, 
+        0)
+    rownames(mat) <- as.character(file_ID)
+    colnames(mat) <- as.character(profile_IDs[1:n_profiles])
+    sub_peaks_ind <- (!is.na(match(profileList[["peaks"]][, "sampleIDs"], 
+        as.numeric(rownames(mat)))) & !is.na(match(profileList[["peaks"]][, 
+        "profileIDs"], as.numeric(colnames(mat)))))
+    mat[cbind(match(as.character(profileList[["peaks"]][sub_peaks_ind, 
+        "sampleIDs"]), rownames(mat)), match(as.character(profileList[["peaks"]][sub_peaks_ind, 
+        "profileIDs"]), colnames(mat)))] <- profileList[["peaks"]][sub_peaks_ind, 
+        "intensity"]
+    if (any(is.na(mat))) {
+        stop("Sth went wrong in function profiles_to_matrix - debug_1!")
+    }
+    if (any(apply(mat, 2, max) == 0)) {
+        stop("Sth went wrong in function profiles_to_matrix - debug_2!")
+    }
+    if (normalize) {
+        mat <- sweep(mat, 2, apply(mat, 2, max), "/")
+    }
+    return(mat)
+}
+```
+
+##Other functions
+```{r}
+f = list(family = "Arial", color = "black", size = 13)
+
+MP.pro.ID <- function(mz, rt.s){
+df <- data.frame(profileList$index_prof)
+ppm <- 5
+rt.del.s <- 5
+mz.l <- mz - ppm/10^6*mz
+mz.h <- mz + ppm/10^6*mz
+rt.l <- rt.s - rt.del.s
+rt.h <- rt.s + rt.del.s
+df[mz.l < df$mean_mz & df$mean_mz < mz.h & rt.l < df$mean_RT & df$mean_RT < rt.h,"profile_ID"][1]
+}
+
+MP.trend <- function(pro.ID){
+pro.dat = profileList[["peaks"]][profileList[["index_prof"]][pro.ID,"start_ID"]:profileList[["index_prof"]][pro.ID,"end_ID"],]
+colnames(pro.dat) = c("m.z","intensity","RT","peakIDs","links","sampleIDs","partitionIDs","profileIDs","in_blind")
+pro.dat <- merge(pro.dat, measurements, by="sampleIDs", all=TRUE)
+pro.dat$intensity[is.na(pro.dat$intensity)] <- 0
+pro.dat$Date <- as.Date(pro.dat$Date)
+pro.dat[order(pro.dat$Date),]
+}
+
+MP.trend.plot <- function(pro.ID){
+plot_ly(data=pro.dat.sample, x=pro.dat.sample$Date, y=pro.dat.sample$intensity, type = "scatter", mode="lines", name = "Sample intensity", line=list(color="green", dash="solid")) %>%
+add_trace(data=pro.dat.blank, x=pro.dat.blank$Date, y=pro.dat.blank$intensity, type = "scatter", mode="lines", name = "Blind intensity", line=list(color="red", dash="solid")) %>%
+layout(title = "",
+       legend = list(orientation = 'v', x = 1.05, y = 1.00),
+       xaxis = list(title = "Date", type="date", range=c(min(measurements$Date),max(measurements$Date))),
+       yaxis = list(title = "Normalized intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE,
+                    range=c(0,max(pro.dat.sample$intensity)*1.1)))
+}
+
+MP.trend.plot2 <- function(pro.ID){
+plot_ly(data=pro.dat.sample, x=pro.dat.sample$Date, y=pro.dat.sample$intensity, type = "scatter", mode="lines", name = "Sample intensity", line=list(color="green", dash="solid"), source="trend") %>%
+add_trace(data=pro.dat.blank, x=pro.dat.blank$Date, y=pro.dat.blank$intensity, type = "scatter", mode="lines", name = "Blind intensity", line=list(color="red", dash="solid")) %>%
+add_trace(data=pro.dat.sample.sub, x=pro.dat.sample.sub$Date, y=pro.dat.sample.sub$intensity, type = "scatter",
+          mode="markers", marker=list(color="orange", size=18, symbol=20), showlegend = FALSE) %>%    
+layout(title = "",
+       legend = list(orientation = 'v', x = 1.05, y = 1.00),
+       xaxis = list(title = "Date", type="date", range=c(min(measurements$Date),max(measurements$Date))),
+       yaxis = list(title = "Normalized intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE,
+                    range=c(0,max(pro.dat.sample$intensity)*1.1)))
+}
+
+
+profile.func <- function(profileList, links_profiles, n_profiles, median_above_blind, min_peaks, min_RT,min_mean_int_sample,max_mean_int_sample,n_consec,reduce_comp_input){
+    profiles.all <- profiles_to_matrix(profileList=profileList, 
+                                       links_profiles=links_profiles,
+                                       reduce_comp2=reduce_comp_input,
+                                       reduce_comp =reduce_comp_input,
+                                       sort_by=c("number_peaks_sample","mean_int"),
+                                       n_profiles=n_profiles, 
+                                       only_sample_peaks=TRUE, 
+                                       n_latest_peaks=NULL, 
+                                       median_above_blind=median_above_blind, 
+                                       normalize=TRUE,
+                                       min_RT=min_RT,
+                                       min_mean_int_sample=min_mean_int_sample,
+                                       max_mean_int_sample=max_mean_int_sample)
+    
+#subset only 1 rep.
+    profiles.all <- cbind(measurements.all.sam$profiled,profiles.all) 
+    profiles.all <- subset(profiles.all, profiles.all[,1] == "TRUE")[,-1]
+    profiles.all.t <- t(profiles.all)
+
+#set 0 to NA 
+    profiles.all.t[profiles.all.t==0] <- NA
+
+#subset min num peaks
+      peak.count <- rep(NA,nrow(profiles.all.t))
+  for (i in 1:nrow(profiles.all.t)) {
+    peak.count[i] <- length(profiles.all.t[i,]) - sum(is.na(profiles.all.t[i,]))
+    }
+    profiles.all.t <- cbind(peak.count,profiles.all.t)
+    profiles.all.t <- subset(profiles.all.t, as.numeric(profiles.all.t[,1]) >= min_peaks)[,-1]
+
+#subset consec peaks
+      consec <- rep(NA,nrow(profiles.all.t))
+  for (i in 1:nrow(profiles.all.t)) {
+    if(anyNA(profiles.all.t[i,]) == TRUE)
+      {
+    a2 = attr(na.contiguous(profiles.all.t[i,]),"tsp")[2]
+    a1 = attr(na.contiguous(profiles.all.t[i,]),"tsp")[1]
+    b = a2 - a1 + 1
+    if(length(b)==0){b=0}
+    consec[i] <- b
+    } else {consec[i] <- length(profiles.all.t[i,])}
+  }
+    profiles.all.t <- cbind(consec,profiles.all.t)
+    profiles.all.t <- subset(profiles.all.t, as.numeric(profiles.all.t[,1]) >= n_consec)[,-1]
+    
+#set NA back to 0     
+    profiles.all.t[is.na(profiles.all.t)] <- 0
+    
+#function output
+    profiles.all.t
+}
+
+
+getData2 <- function(s){
+  peaks <- s@peaksCount
+	cols <- c("mz", "intensity", "satellite", "low", "rawOK", "good", "mzCalc", "formula", "dbe", "formulaCount", "dppm", "dppmBest")
+	cols.isFilled <- unlist(lapply(cols, function(col) length(slot(s, col)) == peaks))
+	cols.filled <- cols[cols.isFilled]
+	data <- lapply(cols.filled, function(col) slot(s, col))
+	data$stringsAsFactors <- FALSE
+	df <- do.call(data.frame,data)
+	colnames(df) <- cols.filled
+	df
+}
+
+IsotopicDistribution2 <- function (formula = list(), charge = 1) 
+{
+    if (charge == 0) 
+        stop("a charge of zero is not allowed")
+    inputFormula <- list(C = 0, H = 0, N = 0, O = 0, S = 0, P = 0, 
+        Br = 0, Cl = 0, F = 0, Si = 0)
+    inputFormula[names(formula)] <- formula
+    simulation <- function(inputFormula) {
+        massCarbon <- sum(sample(c(12, 13.0033548378), 
+                           size = inputFormula$C,
+                           replace = TRUE, 
+                           prob = c(0.9893, 0.0107)))
+        massHydrogen <- sum(sample(c(1.0078250321, 2.014101778), 
+                           size = inputFormula$H, 
+                           replace = TRUE, 
+                           prob = c(0.999885, 0.000115)))
+        massNitrogen <- sum(sample(c(14.0030740052, 15.0001088984), 
+                          size = inputFormula$N, 
+                          replace = TRUE, 
+                          prob = c(0.99632, 0.00368)))
+        massOxygen <- sum(sample(c(15.9949146221, 16.9991315, 17.9991604), 
+                          size = inputFormula$O, 
+                          replace = TRUE, 
+                          prob = c(0.99757, 0.00038, 0.00205)))
+        massSulfer <- sum(sample(c(31.97207069, 32.9714585, 33.96786683, 35.96708088), 
+                          size = inputFormula$S, 
+                          replace = TRUE, 
+                          prob = c(0.9493, 0.0076, 0.0429, 2e-04)))
+        massPhosphorus <- inputFormula$P * 30.97376151
+        massBromine <- sum(sample(c(78.9183376, 80.916291), 
+                          size = inputFormula$Br, 
+                          replace = TRUE, 
+                          prob = c(0.5069, 0.4931)))
+        massChlorine <- sum(sample(c(34.96885271, 36.9659026),
+                          size = inputFormula$Cl, 
+                          replace = TRUE, 
+                          prob = c(0.7578, 0.2422)))
+        massFluorine <- inputFormula$F * 18.9984032
+        massSilicon <- sum(sample(c(27.9769265327, 28.97649472, 29.97377022), 
+                          size = inputFormula$Si, 
+                          replace = TRUE, 
+                          prob = c(0.922297, 0.046832, 0.030872)))
+        massMolecule <- sum(massCarbon, massHydrogen, massNitrogen, massOxygen, massSulfer, massPhosphorus, massBromine, massChlorine, massFluorine, massSilicon)
+        mz <- massMolecule/abs(charge)
+        return(mz)
+    }
+    sim <- replicate(10000, expr = simulation(inputFormula))
+    b <- seq(from = min(sim) - (1/(2 * abs(charge))), to = max(sim) + 
+        1, by = 1/abs(charge))
+    bins <- cut(sim, breaks = b)
+    mz <- round(tapply(sim, bins, mean), digits = 5)
+    intensity <- as.vector(table(bins))
+    spectrum <- data.frame(mz, intensity)
+    spectrum <- spectrum[spectrum$intensity != 0, ]
+    spectrum$percent <- with(spectrum, round(intensity/max(intensity) * 
+        100, digits = 2))
+    row.names(spectrum) <- 1:(nrow(spectrum))
+    return(spectrum)
+}
+
+
+#from package 'ReSOLUTION'
+trimAnnotation <- function (annotated_dataframe, mzLimit = 10, IntLimit = 1, column_names = c("mz", "anno", "intensity", "relInt"), UseRmbDefaultSettings = TRUE) 
+{
+    if (UseRmbDefaultSettings) {
+        RmbDefaultSettings()
+    }
+    filter_settings <- getOption("RMassBank")$filterSettings
+    filter_settings$satelliteMzLimit <- mzLimit
+    filter_settings$satelliteIntLimit <- IntLimit
+    colnames(annotated_dataframe) <- column_names
+    trimmed_frame <- filterPeakSatellites(annotated_dataframe, 
+        filterSettings = filter_settings)
+    return(trimmed_frame)
+}
+```
+
+#Initialization
+```{r}
+if(!is.null(filename.envi)){
+load(file.path(filename.envi,"results/profileList_pos"))
+profileList <- profileList_pos
+
+measurements.dat <- read.csv(file=file.path(filename.envi,"dataframes/measurements"), colClasses = "character")
+measurements.all <- measurements.dat[,c("Type","ID","Date","profiled","Name")]
+colnames(measurements.all) <- c("Type", "sampleIDs","Date","profiled","Name")
+measurements <- subset(measurements.all, profiled == "TRUE")
+}
+```
+
+#Hierarchical clustering analysis (HCA), chemical formula prediction, and candidate ranking
+```{r}
+ui <- navbarPage(title="Non-target structure elucidation workflow - v1.0",
+                 
+    tabPanel("Workflow",
+
+titlePanel("Hierarchical Clustering Analysis"),
+sidebarPanel(
+  selectInput("mode", "Ionization mode:", c("POS" = "POS", "NEG" = "NEG")),
+  fluidRow(numericInput("n_profiles", label = ("Number of profiles"), value = 5000)),
+  fluidRow(numericInput("median_above_blind", label = ("Median sample vs. blind int. ratio"), value = 10)),
+  fluidRow(numericInput("min_peaks", label = ("Min. number of peaks in profile"), value = 30)),
+  fluidRow(numericInput("n_consec", label = ("Min. number of consecutive peaks in profile"), value = 10)),
+  fluidRow(numericInput("min_RT", label = ("Min. RT (s)"), value = 390)),
+  fluidRow(sliderInput("mean_int_sample", label = ("Mean intensity (1^X)"), min=4, max=10, value = c(5,10), step = 0.5)),
+  fluidRow(
+    column(width=3,  align="center", checkboxGroupInput("reduce_comp_input", "Reduce components:", c(""),c(""))),
+    column(width=3,  align="center", checkboxGroupInput("targets_only", "Only include targets:", c(""))),
+    column(width=6,  align="center", actionButton("HCA", "HCA", width='100px', style="padding:20px;"))),
+  fluidRow(numericInput("k.hc", label = ("Number of clusters"), value = 1))
+),
+mainPanel(tags$style(type="text/css",
+               ".shiny-output-error { visibility: hidden; }",
+               ".shiny-output-error:before { visibility: hidden; }"),
+  verbatimTextOutput("clust"),
+  plotlyOutput("hier.clust"),  
+  verbatimTextOutput("click.hca.pro"),
+  plotlyOutput("plot.trend.hca"),
+  verbatimTextOutput("click.hca.info"),
+  verbatimTextOutput("MSMS.info"),
+  fluidRow(
+        column(width=2,  align="center", checkboxGroupInput("sample.input", "Sample Input:", c(""))),
+        column(width=3,  align="left", textInput("sample.name", "Sample name:")),
+        column(width=2,  align="center", checkboxGroupInput("ms.input", "MS Feature Input:", c(""))),
+        column(width=2,  align="left", numericInput("mz.input", "m/z:", value = NULL)),
+        column(width=2,  align="left", numericInput("rt.input", "RT (min):", value = NULL)))
+
+),
+
+titlePanel("Load MS data"),
+sidebarPanel(
+  fluidRow(numericInput("ppm2", label = ("EIC ppm"), value = 5)),
+  fluidRow(numericInput("view", label = ("RT window (min)"), value = 2)),
+  fluidRow(numericInput("mz.coarse", label = ("Coarse MS2 limit"), value = 0.5)),
+  fluidRow(numericInput("ms.trim", label = ("MS label (%)"), value = 5))
+),
+mainPanel(
+  fluidRow(
+    column(width=5, plotlyOutput("plot.EIC")),
+    column(width=5, plotlyOutput("plot.MS1"))),
+  plotlyOutput("plot.msms"),
+  verbatimTextOutput("MSMS.info2")
+),
+
+titlePanel("Generate chemical formula"),
+sidebarPanel(
+  fluidRow(
+    column(width=3 , align="middle", 
+           sliderInput("atoms.C" , label = ("C"),  min=0, max=60, value = c(0,30), step = 1, ticks = F),
+           sliderInput("atoms.H" , label = ("H"),  min=0, max=120, value = c(0,60), step = 1, ticks = F),
+           sliderInput("atoms.N" , label = ("N"),  min=0, max=30, value = c(0,10), step = 1, ticks = F),
+           sliderInput("atoms.O" , label = ("O"),  min=0, max=30, value = c(0,10), step = 1, ticks = F),
+           sliderInput("atoms.P" , label = ("P"),  min=0, max=30, value = c(0,0), step = 1, ticks = F),
+           sliderInput("atoms.F" , label = ("F"),  min=0, max=30, value = c(0,0), step = 1, ticks = F)),
+    column(width=3,  align="middle", 
+           sliderInput("atoms.S" , label = ("S"),  min=0, max=10, value = c(0,0), step = 1, ticks = F),
+           sliderInput("atoms.Cl", label = ("Cl"), min=0, max=10, value = c(0,0), step = 1, ticks = F),
+           sliderInput("atoms.I" , label = ("I"),  min=0, max=10, value = c(0,0), step = 1, ticks = F),
+           sliderInput("atoms.Br", label = ("Br"), min=0, max=10, value = c(0,0), step = 1, ticks = F)),
+    column(width=3,  align=c("left","middle"), 
+           selectInput("ion", "Ion:", c("M+H" = "+H", "M+Na" = "+Na", "M+" = "+e", "M-H" = "-H", "M-" = "-e")),
+           checkboxGroupInput("pubchem.check", "Included in Pubchem?", c(""), c(""))),
+    column(width=3,  align="middle", 
+           actionButton("GenForm", "GenForm", width='100px', style="padding:20px;"),
+           verbatimTextOutput("num.CF")))
+),
+
+mainPanel(
+  plotlyOutput("formulae.scores", height = "600px")
+),
+
+titlePanel("Metfrag analysis"),
+sidebarPanel(
+  fluidRow(numericInput("formula", label = "Select Chemical Formula:", value = 1)),
+  verbatimTextOutput("CF.print"),
+  fluidRow(
+    column(width=2,  align="center", checkboxGroupInput("overwrite", "Overwrite:", c(""))),
+    column(width=2,  align="center", checkboxGroupInput("metfrag.mz", "Use m/z:", c(""))),
+    column(width=2,  align="center", checkboxGroupInput("metfrag.rerun", "Rerun?", c(""))),
+    column(width=3,  align="left",   selectInput("RT_type", "RT index:", c("LVI" = "LVI", "SVI" = "SVI"))),
+    column(width=3,  align="center", actionButton("do.metfrag", "Metfrag", width='100px', style="padding:20px;"))),
+  fluidRow(numericInput("candidate", label = "Select Candidate:", value = 1)),
+  uiOutput("pubchem"),
+  fluidRow(
+    column(width=3, alight="left", uiOutput("refdata")),
+    column(width=3, alight="left", uiOutput("refdata2"))),
+  plotOutput("structure", width = "80%")
+),
+
+mainPanel(
+  plotlyOutput("metfrag.results", height = "450px"),
+  plotlyOutput("plot.msms.ann", height = "450px")
+)
+),
+
+if(!is.null(filename.envi)){
+tabPanel("Search for Profile & Export",
+titlePanel("Search for individual profile"),
+sidebarPanel(
+  fluidRow(numericInput("mz", label = ("mz"), value = 0)),
+  fluidRow(numericInput("ppm_search", label = ("ppm"), value = 5)),
+  fluidRow(numericInput("rt.s", label = ("RT (s)"), value = 0)),
+  fluidRow(numericInput("rt.del.s", label = ("RT (diff.)"), value = 2000)),
+  fluidRow(
+    column(width=3, align="center", actionButton("update", "Update search", width='125px', style="padding:20px;")),
+    column(width=3, align="center", actionButton("combine", "Combine", width='125px', style="padding:20px;")),
+    column(width=2, align="right", checkboxGroupInput("formula_only", "Formula only?", c(""))),
+    column(width=3, align="center", actionButton("export", "Export!", width='125px', style="padding:20px;"))),
+  verbatimTextOutput("pro.id.num2")
+),
+mainPanel(
+  fluidRow(
+    column(width=2, align="center", numericInput("pro.id.num", label=("Profile ID"),value = MP.pro.ID(mz=216.1012,rt.s=851))),
+    column(width=2, align="center", checkboxGroupInput("plot.pro", "Use this profile:", c("")))),
+  plotlyOutput("plot.trend.pro.id"),
+  verbatimTextOutput("click.pro.id.info"),
+  plotlyOutput("combined.plots", height = "800px")
+)
+)
+}else{NULL}
+)
+
+server <- function(input, output, session){
+  
+  observeEvent(input$HCA, {
+    withProgress(message = 'Getting profiles ... ', value=1,{
+    
+    if(input$mode == "POS"){
+      
+    load(file.path(filename.envi,"results/profileList_pos"))
+    profileList <<- profileList_pos
+    load(file.path(filename.envi,"results/links_profiles_pos"))
+    links_profiles <<- links_profiles_pos
+    if(!is.null(target.pro.IDs.pos)){target.pro.IDs <<- read.csv(target.pro.IDs.pos)}
+    
+    measurements.dat<-read.csv(file=file.path(filename.envi,"dataframes/measurements"), colClasses = "character")
+    measurements.dat <- subset(measurements.dat, Mode == "positive")
+    
+    measurements.all <- measurements.dat[,c("Type","ID","Date","profiled","Name")]
+    colnames(measurements.all) <- c("Type", "sampleIDs","Date","profiled","Name")
+    measurements <<- subset(measurements.all, profiled == "TRUE")  #Plot only one of the triplicates?
+    measurements.all.sam <<- subset(measurements.all, Type=="sample")
+    }
+      
+      
+    if(input$mode == "NEG"){
+
+    load(file.path(filename.envi,"results/profileList_neg"))
+    profileList <<- profileList_neg
+    load(file.path(filename.envi,"results/links_profiles_neg"))
+    links_profiles <<- links_profiles_neg
+    if(!is.null(target.pro.IDs.neg)){target.pro.IDs <<- read.csv(target.pro.IDs.neg)}
+    
+    measurements.dat<-read.csv(file=file.path(filename.envi,"dataframes/measurements"), colClasses = "character")
+    measurements.dat <- subset(measurements.dat, Mode == "negative")
+      
+    measurements.all <- measurements.dat[,c("Type","ID","Date","Name", "profiled")]
+    colnames(measurements.all) <- c("Type", "sampleIDs","Date","Name", "profiled")
+    measurements <<- subset(measurements.all, profiled == "TRUE")  #Plot only one of the triplicates?
+    measurements.all.sam <<- subset(measurements.all, Type=="sample")
+    }
+    
+    
+    profiles.all.t <- profile.func(profileList = profileList, links_profiles = links_profiles,
+                                    reduce_comp_input = if(is.null(input$reduce_comp_input)){FALSE}else{TRUE},
+                                    n_profiles=input$n_profiles, 
+                                    median_above_blind=input$median_above_blind, 
+                                    min_peaks=input$min_peaks, 
+                                    min_RT=input$min_RT,
+                                    n_consec=input$n_consec,
+                                    min_mean_int_sample=10^input$mean_int_sample[1],
+                                    max_mean_int_sample=10^input$mean_int_sample[2])
+    })
+    
+    withProgress(message = 'Clustering ... ', value=1,{
+      
+      all.pro.IDs <- rownames(profiles.all.t)
+      
+      if(exists("target.pro.IDs")){
+      save <- rep(NA,nrow(target.pro.IDs))
+      for(i in 1:nrow(target.pro.IDs)){
+          tryCatch({
+          save[i] <- all.pro.IDs[all.pro.IDs==target.pro.IDs$Pro.ID[i]]
+          }, error=function(e){})
+        }
+      
+      target.pro.IDs$post.filters <- save
+      IDs.pts <<- as.numeric(na.omit(save)[1:length(na.omit(save)) ])
+      }else{IDs.pts <<- NULL}
+      
+      if(is.null(input$targets_only)){
+        profiles.all.t <- profiles.all.t
+        }else{
+        profiles.all.t <- subset(profiles.all.t, row.names(profiles.all.t) %in% target.pro.IDs$Pro.ID)
+        }
+      
+      profiles.dist <<- dist(profiles.all.t, method = "euclidean")
+      HC.clust <<- hclust(profiles.dist, method="ward.D2")
+      dend2 <<- as.dendrogram(HC.clust) %>%
+        set("branches_k_color", k = input$k.hc) %>% set("branches_lwd", 0.7) %>%
+        set("labels_cex", 0.8) %>% set("labels_colors", k = input$k.hc) %>%
+        set("leaves_pch", 19) %>% set("leaves_cex", 0.5) 
+      ggd2 <<- as.ggdend(dend2)
+      
+      x.pts <<- rep(0,length(na.omit(save)))
+      
+      if(length(IDs.pts)>1){
+      for(i in 1:length(x.pts)){
+      x.pts[i]<-ggd2$labels$x[ggd2$labels$label==IDs.pts[i]]
+      }
+      x.pts <<- x.pts
+      }
+    
+  output$hier.clust <- renderPlotly({
+    withProgress(message = 'Plotting dendrogram ... ', value=1,{
+    go <- input$HCA
+      
+    dend2 <<- as.dendrogram(HC.clust) %>%
+      set("branches_k_color", k = input$k.hc) %>% set("branches_lwd", 0.7) %>%
+      set("labels_cex", 0.8) %>% set("labels_colors", k = input$k.hc) %>%
+      set("leaves_pch", 19) %>% set("leaves_cex", 0.5) 
+    ggd2 <<- as.ggdend(dend2)
+    
+    pro.ID <<- input$pro.id.num
+    clust.plot <<-  ggplot(ggd2, labels = TRUE, hoverinfo = "none", offset_labels=-1) + theme(legend.position="none")
+    
+    if(length(IDs.pts)>1){
+    for(i in 1:length(x.pts)){
+    x.pts[i]<-ggd2$labels$x[ggd2$labels$label==IDs.pts[i]]
+    }
+    x.pts <<- x.pts
+    
+    if(pro.ID %in% ggd2$labels$label == TRUE){
+      clust.plot + geom_point(aes(x=ggd2$labels$x[ggd2$labels$label==pro.ID], y=0, shape=13, size = 8, col="blue")) +
+                   geom_point(aes(x=x.pts, y=0, shape=10, size = 5))
+    }else{
+      clust.plot + geom_point(aes(x=x.pts, y=0, shape=10, size = 5))
+    }
+    }else{
+    if(pro.ID %in% ggd2$labels$label == TRUE){
+      clust.plot + geom_point(aes(x=ggd2$labels$x[ggd2$labels$label==pro.ID], y=0, shape=13, size = 8, col="blue"))
+    }else{
+      clust.plot
+    }
+    }
+    })  
+  }) 
+      })
+
+      
+  output$clust <- renderPrint({
+    cat("Number of resulting profiles:", nrow(profiles.all.t))
+    })
+
+  })
+
+  output$hier.clust <- renderPlotly({
+    withProgress(message = 'Plotting dendrogram ... ', value=1,{
+
+    dend2 <<- as.dendrogram(HC.clust) %>%
+      set("branches_k_color", k = input$k.hc) %>% set("branches_lwd", 0.7) %>%
+      set("labels_cex", 0.8) %>% set("labels_colors", k = input$k.hc) %>%
+      set("leaves_pch", 19) %>% set("leaves_cex", 0.5) 
+    ggd2 <<- as.ggdend(dend2)
+    
+    if(!is.null(input$plot.pro)){    
+      pro.ID <<- input$pro.id.num
+    }
+    
+    clust.plot <<-  ggplot(ggd2, labels = TRUE, hoverinfo = "none", offset_labels=-1) + theme(legend.position="none")
+    
+    if(length(IDs.pts)>1){
+    for(i in 1:length(x.pts)){
+    x.pts[i]<-ggd2$labels$x[ggd2$labels$label==IDs.pts[i]]
+    }
+    x.pts <<- x.pts
+    
+    if(pro.ID %in% ggd2$labels$label == TRUE){
+      clust.plot + geom_point(aes(x=ggd2$labels$x[ggd2$labels$label==pro.ID], y=0, shape=13, size = 8, col="blue")) +
+                   geom_point(aes(x=x.pts, y=0, shape=10, size = 5))
+    }else{
+      clust.plot + geom_point(aes(x=x.pts, y=0, shape=10, size = 5))
+    }
+    }else{
+    if(pro.ID %in% ggd2$labels$label == TRUE){
+      clust.plot + geom_point(aes(x=ggd2$labels$x[ggd2$labels$label==pro.ID], y=0, shape=13, size = 8, col="blue"))
+    }else{
+      clust.plot
+    }
+    }
+    })  
+  })
+  
+  output$click.hca.pro <- renderPrint({
+    pro.ID <- as.numeric(as.character(ggd2$labels[event_data("plotly_click")$x,]$label))
+    if(is.null(event_data("plotly_click"))){cat("Select profile or manually enter profile number")}else{cat("Profile ID:", pro.ID[1])}
+    })  
+  
+  output$plot.trend.hca <- renderPlotly({
+    if(is.null(input$plot.pro)){
+        pro.ID <- as.numeric(as.character(ggd2$labels[event_data("plotly_click")$x,]$label))
+    }else{
+        pro.ID <- input$pro.id.num}
+      
+    pro.dat <<- MP.trend(pro.ID)
+    pro.dat.sample <<- subset(pro.dat, Type == "sample")
+    pro.dat.blank <<- subset(pro.dat, Type == "blank")
+    pro.dat.sample.sub <<- subset(pro.dat.sample, Date==event_data("plotly_click", source = "trend")$x)
+    MP.trend.plot2(pro.ID)
+    }) 
+  
+  output$plot.trend.pro.id <- renderPlotly({
+    pro.ID <- input$pro.id.num
+    pro.dat <<- MP.trend(pro.ID)
+    dat2 <<- data.frame(round(mean(na.omit(pro.dat$m.z)),4),
+                       round(mean(na.omit(pro.dat$RT)),0),
+                       round(mean(na.omit(pro.dat$RT))/60,1))
+    colnames(dat2) <- c("mz","RT(s)","RT(min)")
+    
+    pro.ID <<- input$pro.id.num
+    pro.dat <<- MP.trend(pro.ID)
+    pro.dat.sample <<- subset(pro.dat, Type == "sample")
+    pro.dat.blank <<- subset(pro.dat, Type == "blank")
+    MP.trend.plot(pro.ID)
+    }) 
+  
+  output$click.pro.id.info <- renderPrint({
+    pro.ID <<- input$pro.id.num
+    pro.dat <<- MP.trend(pro.ID)
+    dat <- data.frame(0)
+    dat$mz <- round(mean(na.omit(pro.dat$m.z)),4)
+    dat$'RT(s)' <- round(mean(na.omit(pro.dat$RT)),0)
+    dat$'RT(min)' <- round(mean(na.omit(pro.dat$RT))/60,1)
+    dat.pro <<- dat
+    print(dat[-1], row.names = "")
+    })   
+  
+  output$pro.id.num2 <- renderPrint({
+    df <- data.frame(profileList$index_prof)
+    df$mean_RT <- round(df$mean_RT,0)
+    df$above_blind. <- round(df$above_blind.,1)
+    mz <- input$mz
+    ppm <- input$ppm_search
+    rt.s <- input$rt.s
+    rt.del.s <- input$rt.del.s
+    mz.l <- mz - ppm/10^6*mz
+    mz.h <- mz + ppm/10^6*mz
+    rt.l <- rt.s - rt.del.s
+    rt.h <- rt.s + rt.del.s
+    df.profiles <<- df[mz.l < df$mean_mz & df$mean_mz < mz.h & rt.l < df$mean_RT & df$mean_RT < rt.h,
+             c("profile_ID","mean_mz","mean_RT","number_peaks_sample","above_blind.")]
+    print(df.profiles, row.names = FALSE)
+    })
+
+  output$click.hca.info <- renderPrint({
+    if(is.null(input$plot.pro)){
+    pro.ID <- as.numeric(as.character(ggd2$labels[event_data("plotly_click")$x,]$label))
+      }else{
+    pro.ID <- input$pro.id.num}
+    
+    pro.dat <<- MP.trend(pro.ID)
+    dat <<- data.frame(round(mean(na.omit(pro.dat$m.z)),4),
+                       round(mean(na.omit(pro.dat$RT)),0),
+                       round(mean(na.omit(pro.dat$RT))/60,1))
+    colnames(dat) <- c("mz","RT(s)","RT(min)")
+    
+    if(is.null(input$ms.input)){
+      updateNumericInput(session, inputId = "mz.input", value = dat[,1])
+      updateNumericInput(session, inputId = "rt.input", value = dat[,3])
+    }
+    print(dat, row.names = "")
+    })    
+  
+  output$MSMS.info <- renderPrint({
+    if (is.null(event_data("plotly_click", source = "trend")$x)){cat("Select date or manually enter MS info")}else{
+      print(subset(pro.dat.sample, Date==event_data("plotly_click", source = "trend")$x)[c(11,1)], row.names = "")}
+    })        
+ 
+  output$plot.EIC <- renderPlotly({
+    withProgress(message = "Loading MS Data ...", value=1,{
+
+    if(is.null(input$sample.input)){
+    pro.dat.sample.sub <<- subset(pro.dat.sample, Date==event_data("plotly_click", source = "trend")$x)
+    msRaw <<- openMSfile(file.path(paste0(filename.msms,"/",gsub("\\..*","",measurements[measurements$sampleIDs==pro.dat.sample.sub$sampleIDs,"Name"]),".mzXML")))
+    RmbDefaultSettings()
+    updateTextInput(session, inputId = "sample.name", value = paste0(gsub("\\..*","",measurements[measurements$sampleIDs==pro.dat.sample.sub$sampleIDs,"Name"])))
+    }else{
+    msRaw <<- openMSfile(file.path(paste0(filename.msms,"/",input$sample.name,".mzXML")))
+    RmbDefaultSettings()
+      if(!is.null(input$ms.input)){
+        dat <- data.frame(0)
+        dat[,1] <- input$mz.input
+        dat[,2] <- input$rt.input*60
+        dat[,3] <- input$rt.input
+        dat <<- dat
+      }
+    }
+
+    mz <- dat[,1]
+    mz.l <- mz - input$ppm2/10^6*mz
+    mz.h <- mz + input$ppm2/10^6*mz
+    #MS1.peak <- MS.data[mz.l < MS.data$m.z & MS.data$m.z < mz.h,]
+    #MS1.peak <- MS1.peak[order(MS1.peak$RT),] 
+    
+    rt.eic <<- event_data("plotly_click", source="EIC")$x
+    #MS1.peak.sub <- subset(MS1.peak, RT==rt.eic)
+    
+    
+    MS1.peak <<- findEIC(msRaw, mz, ppm(mz, input$ppm2, p=TRUE))
+    MS1.peak.sub <- subset(MS1.peak, rt==rt.eic)
+    
+    MSMS <<- findMsMsHR.mass(msRaw, mz,
+                           limit.fine = ppm(mz, input$ppm2, p=TRUE),
+                           limit.coarse = input$mz.coarse,
+                           rtLimits = c(dat[,2]-60*input$view/2,dat[,2]+60*input$view/2), 
+                           deprofile = NA)
+    MSMS.rt<<-rep(NA,length(MSMS))
+    for(i in 1:length(MSMS)){
+      if(MSMS[[1]]@found){
+    MSMS.rt[i]<<-MSMS[[i]]@parent@rt}else{MSMS.rt<-NA}}
+    
+    MSMS.sel <<- which.min(abs(MSMS.rt-rt.eic)) 
+    MSMS.sel.rt <<- MSMS.rt[which.min(abs(MSMS.rt-rt.eic))]
+    
+    MS1.peak.subset <- subset(MS1.peak, MS1.peak$rt > dat[,2]-2.5*60 & MS1.peak$rt < dat[,2]+2.5*60)
+    
+    p.eic <<- plot_ly(data=MS1.peak.subset, x=MS1.peak.subset$rt/60, y=MS1.peak.subset$intensity, 
+                      showlegend = FALSE, type = "scatter", mode="lines",
+            line=list(color="black", dash="solid")) %>%
+      layout(title = "", font = f,
+        xaxis = list(title = "RT (min)"),
+        yaxis = list(title = "Intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE))%>% 
+      add_annotations(x = 0.425, y = 0.95, xref='paper', yref='paper', 
+                      text = format(MS1.peak.subset[which.max(MS1.peak.subset$intensity),"rt"]/60,
+                                    nsmall=2,digits=1), showarrow = F,yanchor = 'bottom')
+
+    plot_ly(data=MS1.peak, x=MS1.peak$rt, y=MS1.peak$intensity, type = "scatter", mode="lines",
+            line=list(color="black", dash="solid"), source="EIC") %>%
+      layout(title = "", showlegend = FALSE,
+        xaxis = list(title = "RT (s)", range=c(dat[,2]-60*input$view/2,dat[,2]+60*input$view/2)),
+        yaxis = list(title = "Intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE))
+
+    if(is.na(MSMS.rt)[1]){
+    plot_ly(data=MS1.peak, x=MS1.peak$rt, y=MS1.peak$intensity, type = "scatter", mode="lines",
+            line=list(color="black", dash="solid"), source="EIC") %>%
+      add_trace(data=MS1.peak.sub, x=MS1.peak.sub$rt, y=MS1.peak.sub$intensity, type = "scatter",
+        mode="markers", marker=list(color="orange", size=18, symbol=20), showlegend = FALSE) %>%
+      layout(title = "", showlegend = FALSE,
+        xaxis = list(title = "RT (s)", range=c(dat[,2]-60*input$view/2,dat[,2]+60*input$view/2)),
+        yaxis = list(title = "Intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE))
+    }else{if(is.null(rt.eic)){
+    plot_ly(data=MS1.peak, x=MS1.peak$rt, y=MS1.peak$intensity, type = "scatter", mode="lines",
+            line=list(color="black", dash="solid"), source="EIC") %>%
+      layout(title = "", showlegend = FALSE,
+        xaxis = list(title = "RT (s)", range=c(dat[,2]-60*input$view/2,dat[,2]+60*input$view/2)),
+        yaxis = list(title = "Intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE))
+    }else{
+    plot_ly(data=MS1.peak, x=MS1.peak$rt, y=MS1.peak$intensity, type = "scatter", mode="lines",
+            line=list(color="black", dash="solid"), source="EIC") %>%
+      add_trace(data=MS1.peak.sub, x=MS1.peak.sub$rt, y=MS1.peak.sub$intensity, type = "scatter",
+        mode="markers", marker=list(color="orange", size=18, symbol=20), showlegend = FALSE) %>%
+      add_segments(data = MSMS.rt, x=MSMS.rt, y=max(MS1.peak$intensity), xend=MSMS.rt, yend=0, 
+                     line = list(color="gray", dash='dash')) %>% 
+      add_segments(data = MSMS.sel.rt, x=MSMS.sel.rt, y=max(MS1.peak$intensity), xend=MSMS.sel.rt, yend=0, 
+                     line = list(color="red", dash='solid')) %>% 
+      layout(title = "", showlegend = FALSE,
+        xaxis = list(title = "RT (s)", range=c(dat[,2]-60*input$view/2,dat[,2]+60*input$view/2)),
+        yaxis = list(title = "Intensity", exponentformat = "e", showgrid = TRUE, zeroline = FALSE))      
+    }}
+  })
+  })
+
+
+  output$plot.MS1 <- renderPlotly({
+    rt.eic <<- event_data("plotly_click", source="EIC")$x
+    go <- input$GenForm
+    formula <- input$formula
+    
+    msRaw.dat <- header(msRaw)
+    msRaw.dat <- subset(msRaw.dat, msLevel == 1)
+    MS1.ms <- data.frame(peaks(msRaw, msRaw.dat[which(msRaw.dat$retentionTime == rt.eic),]$seqNum))
+    colnames(MS1.ms) <-  c("m.z","intensity")
+
+    mz <- dat[,1]
+    mz.l2 <- mz - 0.5
+    mz.h2 <- mz + 2.5
+    MS1.ms <- MS1.ms[mz.l2 < MS1.ms$m.z & MS1.ms$m.z < mz.h2,]
+    MS1.ms <<- MS1.ms
+    
+    MS1.trim <- MS1.ms
+    colnames(MS1.trim) <- c("mz","intensity")
+    MS1.trim <- trimAnnotation(MS1.trim, mzLimit=0.25, IntLimit=1, column_names=c("mz","intensity"))
+    MS1.trim <- MS1.trim[MS1.trim$intensity > max(MS1.trim$intensity)*input$ms.trim/100,]
+    
+    if(!is.na(MSMS.rt)[1]){
+    MS2.ms <<- getData2(MSMS[[MSMS.sel]]@children@listData[[1]])
+    
+    if(input$ion == "+H"){charge = 1; adduct = 1.007825}
+    if(input$ion == "-H"){charge = -1; adduct = -1.007825}
+    if(input$ion == "+Na"){charge = 1; adduct = 22.9892213}
+    if(input$ion == "+e"){charge = 1; adduct = 0}
+    if(input$ion == "-e"){charge = -1; adduct = 0}
+    
+    if(exists("CF")){if(!CF=="NA"){
+    MS1.theo <- get.isotopes.pattern(get.formula(CF, charge), minAbund=0.005)
+    MS1.theo[,1] <- MS1.theo[,1] + adduct
+    
+    y.range <- MS1.trim$intensity/max(MS1.trim$intensity)
+    x.range <- MS1.trim$mz
+
+    p.MS1 <<- plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS1.ms, x=MS1.ms$m.z, y=MS1.ms$intensity/max(MS1.ms$intensity), xend=MS1.ms$m.z, yend=0) %>% 
+      add_segments(data = MS1.theo, x=MS1.theo[,1], y=-MS1.theo[,2], xend=MS1.theo[,1], yend=0, 
+                   color=I("dark green")) %>% 
+      layout(title = "", showlegend = FALSE, font = f,
+           xaxis = list(title = "m/z", range=c(mz.l2,mz.h2)),
+           yaxis = list(tickmode = "array", tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"), 
+                        title = paste0("Relative Intensity"))) %>% 
+      add_annotations(x = ((x.range-mz.l2)/(mz.h2-mz.l2))*1.1, 
+                      y = ((y.range-0)/(1-0))*(.95-0.5)+0.5, 
+                      xref='paper', yref='paper', text = format(MS1.trim$mz,nsmall=4,digits=1), showarrow = F,yanchor = 'bottom')
+    
+    
+    plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS1.ms, x=MS1.ms$m.z, y=MS1.ms$intensity/max(MS1.ms$intensity), xend=MS1.ms$m.z, yend=0) %>% 
+      add_segments(data = MS1.theo, x=MS1.theo[,1], y=-MS1.theo[,2], xend=MS1.theo[,1], yend=0, 
+                   color=I("dark green")) %>% 
+      layout(title = "", showlegend = FALSE,
+           xaxis = list(title = "m/z", range=c(mz.l2,mz.h2)),
+           yaxis = list(tickmode = "array", tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"), 
+                        title = paste0("Relative Intensity (",format(max(MS1.ms$intensity),scientific = TRUE,digits=3),")"))) %>% 
+      add_annotations(x = MS1.trim$mz,
+                      y = MS1.trim$intensity/max(MS1.trim$intensity),
+                      text = format(MS1.trim$mz,nsmall=4,digits=1), showarrow = F,yanchor = 'bottom')
+      }else{
+    plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS1.ms, x=MS1.ms$m.z, y=MS1.ms$intensity/max(MS1.ms$intensity), xend=MS1.ms$m.z, yend=0) %>% 
+      layout(title = "", showlegend = FALSE,
+           xaxis = list(title = "m/z", range=c(mz.l2,mz.h2)),
+           yaxis = list(tickmode = "array", tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"), 
+                        title = paste0("Relative Intensity (",format(max(MS1.ms$intensity),scientific = TRUE,digits=3),")"))) %>% 
+      add_annotations(x = MS1.trim$mz,
+                      y = MS1.trim$intensity/max(MS1.trim$intensity),
+                      text = format(MS1.trim$mz,nsmall=4,digits=1), showarrow = F,yanchor = 'bottom')  
+      }}else{
+    plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS1.ms, x=MS1.ms$m.z, y=MS1.ms$intensity/max(MS1.ms$intensity), xend=MS1.ms$m.z, yend=0) %>% 
+      layout(title = "", showlegend = FALSE,
+           xaxis = list(title = "m/z", range=c(mz.l2,mz.h2)),
+           yaxis = list(tickmode = "array", tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"), 
+                        title = paste0("Relative Intensity (",format(max(MS1.ms$intensity),scientific = TRUE,digits=3),")"))) %>% 
+      add_annotations(x = MS1.trim$mz,
+                      y = MS1.trim$intensity/max(MS1.trim$intensity),
+                      text = format(MS1.trim$mz,nsmall=4,digits=1), showarrow = F,yanchor = 'bottom')  
+    }}else{
+    plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS1.ms, x=MS1.ms$m.z, y=MS1.ms$intensity/max(MS1.ms$intensity), xend=MS1.ms$m.z, yend=0) %>% 
+      layout(title = "", showlegend = FALSE,
+           xaxis = list(title = "m/z", range=c(mz.l2,mz.h2)),
+           yaxis = list(tickmode = "array", tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"), 
+                        title = paste0("Relative Intensity (",format(max(MS1.ms$intensity),scientific = TRUE,digits=3),")"))) %>% 
+      add_annotations(x = MS1.trim$mz,
+                      y = MS1.trim$intensity/max(MS1.trim$intensity),
+                      text = format(MS1.trim$mz,nsmall=4,digits=1), showarrow = F,yanchor = 'bottom')  
+    }
+  })
+  
+
+  observeEvent(input$GenForm, {
+    withProgress(message = 'Genform ... ', value=1,{
+    write.table(MS1.ms[,c(1,2)], paste0(filename.gen,"/MS1.ms.txt"), sep=" ", row.names = FALSE, col.names = FALSE)
+    write.table(MS2.ms[,c(1,2)], paste0(filename.gen,"/MS2.ms.txt"), sep=" ", row.names = FALSE, col.names = FALSE)
+
+     atoms.all <- c("C", "H", "N", "O", "P", "F", "S", "Cl", "I", "Br")
+    
+     atoms.all.max <- c(input$atoms.C[2], 
+                        input$atoms.H[2], 
+                        input$atoms.N[2], 
+                        input$atoms.O[2], 
+                        input$atoms.P[2], 
+                        input$atoms.F[2], 
+                        input$atoms.S[2], 
+                        input$atoms.Cl[2], 
+                        input$atoms.I[2], 
+                        input$atoms.Br[2])
+     
+     atoms.list <<- atoms.all[atoms.all.max > 0]
+
+    tryCatch(
+      RunGenForm(ms_file = paste0(filename.gen,"/MS1.ms.txt"), 
+               msms_file = paste0(filename.gen,"/MS2.ms.txt"), 
+               mz = dat[,1],
+               ion = input$ion,
+               ppm=input$ppm2, acc=15,
+               elements=paste(atoms.list, collapse = ''), #CHBrClFINOPSSi
+               cleanMSMS = TRUE,
+               GenFormDir = filename.gen,
+               ResultsDir = filename.gen), error=function(e) print("GenForm error"))
+    
+    formulae <<- tryCatch(read.table(paste0(filename.gen,"/MS2.ms_GenForm.txt")), error=function(e) NULL)
+    
+    if(!is.null(formulae)){
+    colnames(formulae) <- c("Formula","?","ppm","MS MV", "MS/MS MV", "combined MV")
+    
+    formulae.check <- rep(NA, nrow(formulae))
+    if("C" %in% atoms.list){formulae.C <- rep(0, nrow(formulae))}
+    if("H" %in% atoms.list){formulae.H <- rep(0, nrow(formulae))}
+    if("N" %in% atoms.list){formulae.N <- rep(0, nrow(formulae))}
+    if("O" %in% atoms.list){formulae.O <- rep(0, nrow(formulae))}
+    if("P" %in% atoms.list){formulae.P <- rep(0, nrow(formulae))}
+    if("F" %in% atoms.list){formulae.F <- rep(0, nrow(formulae))}
+    if("S" %in% atoms.list){formulae.S <- rep(0, nrow(formulae))}
+    if("Cl" %in% atoms.list){formulae.Cl <- rep(0, nrow(formulae))}
+    if("I" %in% atoms.list){formulae.I <- rep(0, nrow(formulae))}
+    if("Br" %in% atoms.list){formulae.Br <- rep(0, nrow(formulae))}
+
+    for(i in 1:nrow(formulae)){
+    formula.char <- as.character(formulae$Formula[i])
+    formula.cdk <- get.formula(formula.char)
+    formulae.check[i] <- isvalid.formula(formula.cdk, rule = c("nitrogen","RDBE"))
+    formula.iso <- data.frame(formula.cdk@isotopes)
+    if("C" %in% formula.iso$isoto){formulae.C[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="C"),"number"]))}
+    if("H" %in% formula.iso$isoto){formulae.H[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="H"),"number"]))}
+    if("N" %in% formula.iso$isoto){formulae.N[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="N"),"number"]))}
+    if("O" %in% formula.iso$isoto){formulae.O[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="O"),"number"]))}
+    if("P" %in% formula.iso$isoto){formulae.P[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="P"),"number"]))}
+    if("F" %in% formula.iso$isoto){formulae.F[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="F"),"number"]))}
+    if("S" %in% formula.iso$isoto){formulae.S[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="S"),"number"]))}
+    if("Cl" %in% formula.iso$isoto){formulae.Cl[i]<-as.numeric(as.character(formula.iso[which(formula.iso$isoto=="Cl"),"number"]))}
+    if("I" %in% formula.iso$isoto){formulae.I[i] <- as.numeric(as.character(formula.iso[which(formula.iso$isoto=="I"),"number"]))}
+    if("Br" %in% formula.iso$isoto){formulae.Br[i]<-as.numeric(as.character(formula.iso[which(formula.iso$isoto=="Br"),"number"]))}
+    }
+    
+    formulae$check <- formulae.check
+    if("C" %in% atoms.list){formulae$C <- formulae.C}
+    if("H" %in% atoms.list){formulae$H <- formulae.H}
+    if("N" %in% atoms.list){formulae$N <- formulae.N}
+    if("O" %in% atoms.list){formulae$O <- formulae.O}
+    if("P" %in% atoms.list){formulae$P <- formulae.P}
+    if("F" %in% atoms.list){formulae$F <- formulae.F}
+    if("S" %in% atoms.list){formulae$S <- formulae.S}
+    if("Cl" %in% atoms.list){formulae$Cl <- formulae.Cl}
+    if("I" %in% atoms.list){formulae$I <- formulae.I}
+    if("Br" %in% atoms.list){formulae$Br <- formulae.Br}
+    
+    formulae <- subset(formulae, check == TRUE)
+    if("C" %in% atoms.list){formulae <- subset(formulae, C >= input$atoms.C[1] & C <= input$atoms.C[2])}
+    if("H" %in% atoms.list){formulae <- subset(formulae, H >= input$atoms.H[1] & H <= input$atoms.H[2])}
+    if("N" %in% atoms.list){formulae <- subset(formulae, N >= input$atoms.N[1] & N <= input$atoms.N[2])} 
+    if("P" %in% atoms.list){formulae <- subset(formulae, P >= input$atoms.P[1] & P <= input$atoms.P[2])}
+    if("F" %in% atoms.list){formulae <- subset(formulae, F >= input$atoms.F[1] & F <= input$atoms.F[2])}
+    if("S" %in% atoms.list){formulae <- subset(formulae, S >= input$atoms.S[1] & S <= input$atoms.S[2])}
+    if("Cl" %in% atoms.list){formulae <- subset(formulae, Cl >= input$atoms.Cl[1] & Cl <= input$atoms.Cl[2])}
+    if("I" %in% atoms.list){formulae <- subset(formulae, I >= input$atoms.I[1] & I <= input$atoms.I[2])}
+    if("Br" %in% atoms.list){formulae <- subset(formulae, Br >= input$atoms.Br[1] & Br <= input$atoms.Br[2])}
+    
+    
+    if(!is.null(input$pubchem.check)){
+      formulae.pub.check <- rep(NA, nrow(formulae))
+      for(i in 1:nrow(formulae)){
+        tryCatch(
+      formulae.pub.check[i] <- nrow(read.table(paste0("https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/fastformula/",formulae$Formula[i],"/cids/TXT"), header = FALSE, fill = TRUE)), error=function(e) NA)
+      }
+      formulae$pub.check <- formulae.pub.check
+      formulae <- subset(formulae, !is.na(pub.check))
+    }
+    
+    formulae <- formulae[order(-formulae$`combined MV`),]
+    formulae <<- formulae
+
+    CF <<- paste(formulae[input$formula,1])
+    }
+    })})
+  
+  output$formulae.scores <- renderPlotly({
+    go <- input$GenForm
+    formula <- input$formula
+    
+    x <- as.vector(formulae$Formula)
+    x <- factor(formulae$Formula,formulae$Formula)
+
+    plot_ly(data=formulae, x=x, y=formulae$`combined MV`, type = "scatter", mode="lines",
+          line=list(color=toRGB("dark red"), dash="solid", width = 4), text = formulae$Formula, hoverinfo = "none", 
+          name= "Combined", source="Formulas") %>%
+    add_trace(x=x, y=formulae$`MS MV`, type = "scatter", mode="lines",
+          line=list(color="black", dash="dash", width = 2), name= "MS", hoverinfo = "none") %>%
+    add_trace(x=x, y=formulae$`MS/MS MV`, type = "scatter", mode="lines",
+          line=list(color="black", dash="dot", width = 2), name= "MS/MS", hoverinfo = "none") %>%
+    add_trace(data=formulae, x=x[formula], y=formulae$`combined MV`[formula], type = "scatter",
+              mode="markers", marker=list(color="orange", size=18, symbol=135), showlegend = FALSE) %>%
+    add_annotations(x = x, y = 0,
+                    text = paste0(format(formulae$ppm,nsmall=2,digits=1)," ppm"), showarrow = F, yanchor = 'top') %>%
+    layout(title = "", showlegend = TRUE, margin = list(b=100),
+      xaxis = list(title = "", tickfont = list(size =18), range=c(-0.5,if(nrow(formulae)>10){10}else{nrow(formulae)}-0.5)),
+      yaxis = list(title = "Score", showgrid = T))      
+    })
+  
+  output$plot.msms <- renderPlotly({
+    rt.eic <<- event_data("plotly_click", source="EIC")$x
+
+    MSMS.rt<<-rep(NA,length(MSMS))
+    for(i in 1:length(MSMS)){
+      if(MSMS[[1]]@found){
+    MSMS.rt[i]<<-MSMS[[i]]@parent@rt}else{MSMS.rt<-NA}}
+    
+    MSMS.sel <<- which.min(abs(MSMS.rt-rt.eic)) 
+    MS2.ms <- getData2(MSMS[[MSMS.sel]]@children@listData[[1]])
+    
+    msms.trim <- trimAnnotation(MS2.ms, mzLimit=(max(MS2.ms$mz)-min(MS2.ms$mz))/15, IntLimit=1, column_names = c("mz","intensity"))
+
+    y1.range = msms.trim$intensity/max(msms.trim$intensity) 
+    
+    p.MS2.cf <<- plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS2.ms[,1:2], x=MS2.ms$mz, y=MS2.ms$intensity/max(MS2.ms$intensity), xend=MS2.ms$mz, yend=0) %>%
+      layout(title = "", showlegend = FALSE, font = f,
+             xaxis = list(title = "m/z", range=c(min(msms.trim$mz)-5,max(msms.trim$mz)+5)),
+             yaxis = list(tickmode = "array", range=c(0,1.005), tickvals = c(1,.5,0), ticktext = c("100%","50%","0%"),
+                          title = paste0("Relative Intensity"))) %>%
+      add_annotations(x = msms.trim$mz,
+                      y = ((y1.range-0)/(1-0))*(1-0)+0, 
+                      #xref= 'x4', yref='paper',
+                      text = format(msms.trim$mz,nsmall=2,digits=1), showarrow = F, yanchor = 'bottom')
+    p.MS2.cf
+    })
+  
+  output$MSMS.info2 <- renderPrint({
+    rt.eic <<- event_data("plotly_click", source="EIC")$x
+    mz <- dat[,1]
+    cat(paste0("Precursor: ", format(MSMS[[MSMS.sel]]@children@listData[[1]]@precursorMz,nsmall=2,digits=1)," at HCD ",MSMS[[MSMS.sel]]@children@listData[[1]]@collisionEnergy," (",format(MSMS[[MSMS.sel]]@parent@rt/60,nsmall=1,digits=1), " min)"))
+  })
+  
+
+  output$CF.print <- renderPrint({
+    go <- input$GenForm
+    formula <- input$formula
+    CF <<- paste(formulae[input$formula,1])
+    cat(CF)
+  })
+ 
+  output$num.CF <- renderPrint({
+    go <- input$GenForm
+    if(nrow(formulae)>0){cat(nrow(formulae))}else{cat("Adjust atom limits")}
+  })
+  
+  observeEvent(input$do.metfrag, {
+    scores<<-c(1, 0.25, 0.25, 0.5, 1, 0.5) 
+    colnames(MS2.ms) <- c("Mass","Intensity")
+    file.loc <<- paste0(filename.met,"/",dat[,1],"_mz_",CF)
+    file <- paste0(file.loc,".csv")
+    file.loc.mz <<- paste0(filename.met,"/",dat[,1],"_mz_")
+    file.mz <- paste0(file.loc.mz,".csv")
+    
+    if(input$ion == "+H"){ionmode <- 1}
+    if(input$ion == "-H"){ionmode <- -1}
+    if(input$ion == "+Na"){ionmode <- 23}
+    if(input$ion == "+e"){ionmode <- 0}
+    if(input$ion == "-e"){ionmode <- 0}
+
+    
+    if(input$RT_type == "LVI"){filename.RT <<- filename.RT.lvi}
+    if(input$RT_type == "SVI"){filename.RT <<- filename.RT.svi}
+
+    withProgress(message = 'Metfrag ... ', value=1,{
+    
+    if(!is.null(input$metfrag.rerun)){
+    scored.candidates <<- MSMS.fcn.rerun(RT = dat[,3], MSMS = MS2.ms, ionmode = ionmode, CF= CF, 
+                                         pubchemid = as.numeric(paste(scored.candidates[input$candidate,"Identifier"])))
+    }else{if(is.null(input$metfrag.mz)){
+      if(file.exists(file=file.path(file)) & is.null(input$overwrite)){
+        scored.candidates <<- tryCatch(read.csv(file=file.path(file)), error=function(e) NULL)
+      }else{
+        scored.candidates <<- MSMS.fcn(mz = dat[,1], RT = dat[,3], MSMS = MS2.ms, CF = CF, ionmode = ionmode)
+        write.csv(scored.candidates[1:50,], file=file.path(file))
+      }
+      }else{
+      if(file.exists(file=file.path(file.mz)) & is.null(input$overwrite)){
+        scored.candidates <<- tryCatch(read.csv(file=file.path(file.mz)), error=function(e) NULL)
+      }else{
+        scored.candidates <<- MSMS.fcn.mz(mz = dat[,1], RT = dat[,3], MSMS = MS2.ms, atoms = atoms.list, ionmode = ionmode)
+        write.csv(scored.candidates[1:50,], file=file.path(file.mz))
+      }
+      }}
+    })
+    })
+    
+
+  output$metfrag.results <- renderPlotly({
+    go <- input$do.metfrag
+    candidate.id <- input$candidate
+    tot.score  = scored.candidates$Score/sum(scores)
+    frag.score = scored.candidates$FragmenterScore/max(scored.candidates$FragmenterScore)
+    mona.score = scored.candidates$OfflineMetFusionScore/max(scored.candidates$OfflineMetFusionScore)
+    rt.score   = scored.candidates$RetentionTimeScore/max(scored.candidates$RetentionTimeScore)
+    sus.score  = scored.candidates$SuspectListScore/max(scored.candidates$SuspectListScore)
+    pat.score  = scored.candidates$PubChemNumberPatents/max(scored.candidates$PubChemNumberPatents)
+    ref.score  = scored.candidates$PubChemNumberPubMedReferences/max(scored.candidates$PubChemNumberPubMedReferences)
+    
+    x=c(1:nrow(scored.candidates))
+    
+    plot_ly(data=scored.candidates, x=x, y=tot.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("dark red"), dash="solid", width = 4), hoverinfo = "none", 
+          name= "Combined", source="metfrag") %>%
+    add_trace(x=x, y=frag.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("red"), dash="solid", width = 2), name= "Fragments", hoverinfo = "none") %>%
+    add_trace(x=x, y=mona.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("red"), dash="15px", width = 2), name= "MoNA", hoverinfo = "none") %>%
+    add_trace(x=x, y=rt.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("gray30"), dash="10px", width = 2), name= "Retention Time", hoverinfo = "none") %>%
+    add_trace(x=x, y=sus.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("gray50"), dash="dashdot", width = 2), name= "Suspect List", hoverinfo = "none") %>%
+    add_trace(x=x, y=pat.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("gray70"), dash="5px", width = 2), name= "PubChem Patents", hoverinfo = "none") %>%
+    add_trace(x=x, y=ref.score, type = "scatter", mode="lines",
+          line=list(color=toRGB("gray70"), dash="2px", width = 2), name= "PubChem References", hoverinfo = "none") %>%
+    add_trace(data=scored.candidates, x=x[candidate.id], y=tot.score[candidate.id], type = "scatter",
+        mode="markers", marker=list(color="orange", size=18, symbol=135), showlegend = FALSE) %>%
+    layout(title = "", showlegend = TRUE,
+      xaxis = list(title = "Candidate", dtick = 1, range = c(0.5,10.01)),
+      yaxis = list(title = "Score", showgrid = T)) 
+      
+  })
+    
+
+  output$plot.msms.ann <- renderPlotly({
+    go <- input$do.metfrag
+    candidate.id <- input$candidate
+    rt.eic <- event_data("plotly_click", source="EIC")$x
+    
+    MSMS.rt<<-rep(NA,length(MSMS))
+    for(i in 1:length(MSMS)){
+      if(MSMS[[1]]@found){
+    MSMS.rt[i]<<-MSMS[[i]]@parent@rt}else{MSMS.rt<-NA}}
+    
+    MSMS.sel <<- which.min(abs(MSMS.rt-rt.eic)) 
+    MS2.ms <- getData2(MSMS[[MSMS.sel]]@children@listData[[1]])
+    
+    msms.ann <- strsplit(strsplit(as.character(scored.candidates$FormulasOfExplPeaks[candidate.id]), ";")[[1]], ":")
+    
+    if(is.na(msms.ann)){print("No fragments match!", row.names="")}else{
+
+    msms.ann2 <- data.frame(round(as.numeric(sapply(msms.ann, "[[", 1)),5), sapply(msms.ann, "[[", 2))
+    colnames(msms.ann2) <- c("mz","cf")
+    MS2.ms$mz2 <- gsub("\\s", "", format(MS2.ms$mz,nsmall=2,digits=1))
+    msms.ann2$mz2 <-gsub("\\s", "", format(msms.ann2$mz,nsmall=2,digits=1))
+    msms.ann2 <- subset(msms.ann2, msms.ann2$mz2 %in% MS2.ms$mz2)
+    MS2.ms$cf <- rep(NA,nrow(MS2.ms))
+    MS2.ms[match(msms.ann2$mz2, MS2.ms$mz2),"cf"] <- as.character(msms.ann2$cf)
+    
+    msms.trim <- trimAnnotation(MS2.ms, mzLimit=(max(MS2.ms$mz)-min(MS2.ms$mz))/15, 
+                                IntLimit=1, column_names = c("mz","intensity","mz2","cf"))
+    msms.trim.ann <- msms.trim[is.na(msms.trim$cf)==F,]
+    msms.yes.ann <- MS2.ms[is.na(MS2.ms$cf)==F,]
+    msms.not.ann <- MS2.ms[is.na(MS2.ms$cf)==T,]
+
+    y1.range = msms.trim$intensity/max(msms.trim$intensity) 
+    y2.range = msms.trim.ann$intensity/max(msms.trim$intensity)
+
+    
+    p.MS2 <<- plot_ly(color = I("black"), showlegend = FALSE) %>%
+      add_segments(data = MS2.ms[,1:2], x=MS2.ms$mz, y=MS2.ms$intensity/max(MS2.ms$intensity), xend=MS2.ms$mz, yend=0) %>%
+      add_segments(data = msms.yes.ann[,1:2], x=msms.yes.ann$mz, y=-msms.yes.ann$intensity/max(MS2.ms$intensity), xend=msms.yes.ann$mz, yend=0, 
+                   line=list(color=toRGB("forestgreen"))) %>%
+      layout(title = "", showlegend = FALSE, font = f,
+             xaxis = list(title = "m/z", range=c(min(msms.trim$mz)-5,max(msms.trim$mz)+5)),
+             yaxis = list(tickmode = "array", range=c(-1.1,1.1), tickvals = c(1,.5,0,-.5,-1), ticktext = c("100%","50%","0%","50%","100%"),
+                          title = paste0("Relative Intensity"))) %>%
+      add_annotations(x = msms.trim$mz,
+                      y = ((y1.range+0)/(1-0))*(.95-0.5)+0.5, 
+                      yref='paper',
+                      text = format(msms.trim$mz,nsmall=2,digits=1), showarrow = F, yanchor = 'bottom') %>%
+      add_annotations(x = msms.trim.ann$mz,
+                      y = 1-(((y2.range+0)/(1-0))*(0.95-0.5)+0.5), 
+                      yref='paper',
+                      text = msms.trim.ann$cf, showarrow = F, yanchor = 'top')
+    p.MS2
+    
+  }
+  })
+  
+  
+  output$structure <- renderPlot({
+    go <- input$do.metfrag
+    candidate.id <- as.numeric(paste(scored.candidates[input$candidate,"Identifier"]))
+    smiles <<- as.character(scored.candidates$SMILES[input$candidate])
+    plotMol(smiles = smiles, width = 300, height = 300)
+  })
+  
+  output$pubchem <- renderUI({
+    go <- input$do.metfrag
+    candidate.id <- as.numeric(paste(scored.candidates[input$candidate,"Identifier"]))
+    link = paste0("https://pubchem.ncbi.nlm.nih.gov/compound/",candidate.id)
+    title = readLines(link)[10]
+    (name <<- gsub("_.*","",gsub(" | ","_",strsplit(strsplit(title, "<title>")[[1]],"</title>")[[2]],fixed=T)))
+    url <- a(name, href=link)
+    tagList("", h2(url))
+  })
+  
+  output$refdata <- renderUI({
+    go <- input$do.metfrag
+    InChIKey.id <- paste(scored.candidates[input$candidate,"InChIKey"])
+    
+    if(nrow(ref.mb[which(ref.mb$InChIKey == InChIKey.id),])>0){
+      link = paste0("http://mona.fiehnlab.ucdavis.edu/spectra/browse?query=compound.metaData%3Dq%3D%27name%3D%3D%22InChIKey%22%20and%20value%3D%3D%22",InChIKey.id,"%22%27&text=&size=10")
+      title = "MoNA"
+      url <- a(title, href=link)
+      tagList("", h4(url))}
+    })
+  
+  output$refdata2 <- renderUI({
+    go <- input$do.metfrag
+    InChIKey.id <- paste(scored.candidates[input$candidate,"InChIKey"])
+    
+    if(nrow(ref.mz[which(ref.mz$InChIKey == InChIKey.id),])>0){
+      link = paste0("https://www.mzcloud.org/compound/Reference/",ref.mz[which(ref.mz$InChIKey == InChIKey.id),]$mzCloudId)
+      title = "mzCloud"
+      url <- a(title, href=link)
+      tagList("", h4(url))}
+  })
+  
+  
+  
+#EXPORTING
+  
+  observeEvent(input$update, {
+    updateNumericInput(session, inputId = "mz", value = dat.pro$mz)
+    updateNumericInput(session, inputId = "rt.s", value = dat.pro$'RT(s)')
+    updateNumericInput(session, inputId = "rt.del.s", value = 30)
+  })
+  
+  
+  observeEvent(input$combine, {
+  output$combined.plots <- renderPlotly({
+    pro.dat <- MP.trend(df.profiles$profile_ID[1])
+    pro.dat.sam <- subset(pro.dat, Type == "sample")
+    
+       
+    tryCatch({
+    
+    if(nrow(df.profiles)>1){
+    df.profiles <- subset(df.profiles, number_peaks_sample > 2)
+
+    for(i in 2:length(df.profiles$profile_ID)){
+    pro.dat.temp <- MP.trend(df.profiles$profile_ID[i])
+    pro.dat.temp <- subset(pro.dat.temp, Type == "sample")
+    pro.dat.sam <- merge(pro.dat.sam, pro.dat.temp[which(pro.dat.temp$intensity > 0),], all = T)
+    }
+    }
+    }, error=function(e){})
+
+    pro.dat.sample <- pro.dat.sam[order(pro.dat.sam$Date, -pro.dat.sam$intensity),]
+    pro.dat.sample <<- pro.dat.sample[!duplicated(pro.dat.sample$Date),]
+    pro.dat.blank <<- subset(pro.dat, Type == "blank")
+ 
+    p.pro <<- MP.trend.plot(pro.ID)
+    
+    if(!is.null(input$formula_only)){
+    p.export <<- subplot(p.pro,
+                         subplot(p.eic, p.MS1, titleX = TRUE, titleY = TRUE,  margin = c(.05,.05,.03,.03)), 
+                         p.MS2.cf, 
+                         nrows=3, titleX = TRUE, titleY = TRUE, which_layout = 1, margin = c(.03,.03,.05,.05)) #l,r,t,b
+    }else{
+    p.export <<- subplot(p.pro,
+                         subplot(p.eic, p.MS1, titleX = TRUE, titleY = TRUE,  margin = c(.05,.05,.03,.03)), 
+                         p.MS2, 
+                         nrows=3, titleX = TRUE, titleY = TRUE, which_layout = 1, margin = c(.03,.03,.05,.05)) #l,r,t,b
+    }
+    p.export
+    })  })
+    
+  
+  observeEvent(input$export, {
+    withProgress(message = 'Exporting ... ', value=1,{
+    if(!is.null(input$formula_only)){  
+    plotly_IMAGE(p.export, width = 850, height = 950, scale = 10, format = "png", 
+                 out_file = paste0(filename.plot,"/",CF,".png"))    
+    }else{
+    plotly_IMAGE(p.export, width = 850, height = 950, scale = 10, format = "png", 
+                 out_file = paste0(filename.plot,"/",name,".png"))
+    }
+    }) })
+  
+  
+  }
+
+
+NT.fcn<-function(){
+shinyApp(ui, server)
+}
+
+NT.fcn()
+```
+
+#Shiny interface
+```{r}
+NT.fcn()
+```
